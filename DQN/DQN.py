@@ -144,7 +144,7 @@ class DQN(object):
     def _construct(self):
         """Define what the graph of DQN is.This method was called once instantiate
         a DQN object"""
-        self.x = tf.placeholder(dtype=tf.float32,shape=[None,84,84,4])               
+        self.x = tf.placeholder(dtype=tf.float32,shape=[None,210,160,4])               
         self.label_info = tf.placeholder(tf.int32,None)
         self.label = tf.placeholder(tf.float32,None)
         with tf.name_scope("conv_1"):
@@ -180,7 +180,7 @@ class DQN(object):
             if piece[3].list_tflag[-1]:
                 ret.append([piece[2],piece[1]])
             else:
-                x = np.array(piece[3].list_states[:]).reshape((1,84,84,4))
+                x = np.array(piece[3].list_states[:]).reshape((1,210,160,4))
                 feed_dict = {self.x:x}
                 max_act_Q_value = np.max(self.sess.run(self.output,feed_dict=feed_dict))
                 y = piece[2] + self.gamma * max_act_Q_value
@@ -191,10 +191,10 @@ class DQN(object):
         ret = []
         for piece in batch_transition:
             ret.append(piece[0].list_states[:])
-        return np.array(ret).reshape((self.batch_size,84,84,4))
+        return np.array(ret).reshape((self.batch_size,210,160,4))
     
     def _make_input_batch_select_action(self,seq):
-        return np.array(seq.list_states[-4:]).reshape((1,84,84,4))
+        return np.array(seq.list_states[-4:]).reshape((1,210,160,4))
     
     def select_action(self,seq):                                               #ToDo:implement other branch of selection strategy,which is random selection
         if len(seq.list_states) > 3:
@@ -203,7 +203,7 @@ class DQN(object):
             return np.argmax(self.sess.run(self.output,feed_dict=feed_dict))   
         else:
             return random.randrange(0,4)
-
+    @timing
     def optimize(self,batch_transition):                                    
         """update network's parameters"""
         x = self._make_input_batch_optimize(batch_transition)
@@ -242,9 +242,9 @@ class Environment(object):
         return reward,next_state,t_flag
                                                         
 class Learning(object):
-    def __init__(self,episode=1000,timestep=1000,capacity=300,gamma=0.8,learning_rate=0.03,batch_size=32,step_size=4):
+    def __init__(self,episode=60000,timestep=3000,capacity=600,gamma=0.8,learning_rate=0.03,batch_size=32,step_size=4,cp_step=500):
         self._init_training_parameters(episode,timestep,capacity,gamma,learning_rate,
-                                       batch_size,step_size)
+                                       batch_size,step_size,cp_step)
         self._init_tf_session()
     
     def _preprocess_seq(self,seq):                                             #ToDo:1:need to check the logic under the whole control flow (Done)
@@ -254,8 +254,8 @@ class Learning(object):
             state = seq.list_states[n] 
             img = Image.fromarray(np.uint8(state))
             img = img.convert("L")
-            img = img.crop((38,126,122,210))                                   #crop to size of (84,84) as paper said
             state = np.array(img).astype(np.uint8)
+            state = state / 255                                                #rescale image into range 0 ~ 1
             ret.list_states.append(state)
         return ret
         
@@ -263,7 +263,7 @@ class Learning(object):
         tf.reset_default_graph()
         self.learningSession = tf.Session()
     
-    def _init_training_parameters(self,episode_num,timesteps,capacity,gamma,learning_rate,batch_size,step_size):
+    def _init_training_parameters(self,episode_num,timesteps,capacity,gamma,learning_rate,batch_size,step_size,cp_step):
         self.episode_num = episode_num
         self.timesteps = timesteps
         self.capacity = capacity
@@ -271,37 +271,51 @@ class Learning(object):
         self.lr = learning_rate
         self.batch_size = batch_size
         self.step_size = step_size
+        self.cp_step = cp_step
+        
+    def _init_saver(self):
+        self.saver = tf.train.Saver()
+        
+    def _exit_training(self):
+        self.learningSession.close()
+        self.env.close()
+        
+    def _model_checkpoint(self):
+        self.saver.save(self.learningSession,'./modelcp/dqn_model')
     
     def train(self):
         
-        replaymem = ReplayMemory(self.capacity)
-        dqn = DQN(self.learningSession,self.gamma,self.lr,self.batch_size)
-        env = Environment()
+        self.replaymem = ReplayMemory(self.capacity)
+        self.dqn = DQN(self.learningSession,self.gamma,self.lr,self.batch_size)
+        self.env = Environment()
         loginfo = "Now in episode {epi}; timestep {time}."
         
+        self._init_saver()
         for ep in range(self.episode_num):
-            seq = StateSequence(env)
+            seq = StateSequence(self.env)
             seq.reset()
             for ts in range(self.timesteps):
                 print(loginfo.format(epi=ep,time=ts))
 
                 seq_ = self._preprocess_seq(seq)
-                act = dqn.select_action(seq_)
-                reward,next_state,Done = env.trigger_emulator(act)
+                act = self.dqn.select_action(seq_)
+                reward,next_state,Done = self.env.trigger_emulator(act)
                 next_seq = seq.expand(act,next_state,Done)
                 next_seq_ = self._preprocess_seq(next_seq)
                 seq.update(act,next_state,Done)
                 transition_tuple = (seq_,act,reward,next_seq_)
-                replaymem.store(transition_tuple)
+                self.replaymem.store(transition_tuple)
                 
-                if (ep or ts > self.batch_size) and not ts % self.step_size:
-                    batch_transition = replaymem.sample(self.batch_size)
-                    dqn.optimize(batch_transition)
+                if (self.replaymem.current_capacity > self.batch_size) and not (ts % self.step_size):
+                    batch_transition = self.replaymem.sample(self.batch_size)
+                    self.dqn.optimize(batch_transition)
                 if Done: 
                     print("game is over! next episode...")
                     break
+            if (not ep % self.cp_step) or (not ep):
+                self._model_checkpoint()
                 
-        self.learningSession.close()
+        self._exit_training()
 
 if __name__ == '__main__':
     dqn_learning = Learning()
