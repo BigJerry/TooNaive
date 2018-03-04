@@ -123,6 +123,7 @@ class DQN(object):
         self.gamma = gamma
         self.lr = lr
         self.batch_size = batch_size
+        self._probobility_space = np.linspace(1,0.1,1000000)
         self._init_graph()
         
     def _init_graph(self):
@@ -196,11 +197,16 @@ class DQN(object):
     def _make_input_batch_select_action(self,seq):
         return np.array(seq.list_states[-4:]).reshape((1,210,160,4))
     
-    def select_action(self,seq):                                               #ToDo:implement other branch of selection strategy,which is random selection
+    def select_action(self,seq,frame):                                         #ToDo:implement other branch of selection strategy,which is random selection (Done)
         if len(seq.list_states) > 3:
-            inputs = self._make_input_batch_select_action(seq)
-            feed_dict = {self.x:inputs}
-            return np.argmax(self.sess.run(self.output,feed_dict=feed_dict))   
+            p = (self._probobility_space[frame] if frame <= 999999 else 0.1)
+            act_randomly = np.random.binomial(1,p)
+            if act_randomly: 
+                return random.randrange(0,4)
+            else:
+                inputs = self._make_input_batch_select_action(seq)
+                feed_dict = {self.x:inputs}
+                return np.argmax(self.sess.run(self.output,feed_dict=feed_dict))   
         else:
             return random.randrange(0,4)
     @timing
@@ -220,7 +226,7 @@ class DQN(object):
 class Environment(object):
     def __init__(self):
         self._init_env()
-        
+        self.total_frames = 0
         self.last_lives = 5                                                    #specify total lives of agent . It varies depending on different games.
         
     def _init_env(self):
@@ -235,6 +241,7 @@ class Environment(object):
         by a tuple.And also when you call this method it will render a window
         to show you result where action has been performed."""
         next_state,reward,t_flag,info = self.env.step(act)
+        self.total_frames += 1
         if info['ale.lives'] < self.last_lives:
             reward = info['ale.lives'] - self.last_lives
             self.last_lives = info['ale.lives']
@@ -242,13 +249,13 @@ class Environment(object):
         return reward,next_state,t_flag
                                                         
 class Learning(object):
-    def __init__(self,episode=60000,timestep=3000,capacity=600,gamma=0.8,learning_rate=0.03,batch_size=32,step_size=4,cp_step=500):
+    def __init__(self,episode=60000,timestep=300000,capacity=2000,gamma=0.7,learning_rate=0.003,batch_size=32,step_size=4,cp_step=500):
         self._init_training_parameters(episode,timestep,capacity,gamma,learning_rate,
                                        batch_size,step_size,cp_step)
         self._init_tf_session()
     
     def _preprocess_seq(self,seq):                                             #ToDo:1:need to check the logic under the whole control flow (Done)
-        ret = seq.copy()                                                       #     2:need to add other operations to preprocess image
+        ret = seq.copy()                                                       #     2:need to add other operations to preprocess image (Done)
         ret.list_states = []
         for n in range(len(seq.list_states)) :    
             state = seq.list_states[n] 
@@ -288,32 +295,31 @@ class Learning(object):
         self.replaymem = ReplayMemory(self.capacity)
         self.dqn = DQN(self.learningSession,self.gamma,self.lr,self.batch_size)
         self.env = Environment()
-        loginfo = "Now in episode {epi}; timestep {time}."
+        initial_loginfo = "Now in episode {epi}; timestep {time}."
+        ending_loginfo = "Reward is {rwd}; current frame:{frm}"
         
         self._init_saver()
         for ep in range(self.episode_num):
             seq = StateSequence(self.env)
             seq.reset()
+            act = 0
             for ts in range(self.timesteps):
-                print(loginfo.format(epi=ep,time=ts))
-
+                print(initial_loginfo.format(epi=ep,time=ts))
                 seq_ = self._preprocess_seq(seq)
-                act = self.dqn.select_action(seq_)
+                if not (ts % self.step_size):
+                    act = self.dqn.select_action(seq_,self.env.total_frames)   #skip step_size frames as paper said
                 reward,next_state,Done = self.env.trigger_emulator(act)
                 next_seq = seq.expand(act,next_state,Done)
                 next_seq_ = self._preprocess_seq(next_seq)
                 seq.update(act,next_state,Done)
                 transition_tuple = (seq_,act,reward,next_seq_)
                 self.replaymem.store(transition_tuple)
-                
-                if (self.replaymem.current_capacity > self.batch_size) and not (ts % self.step_size):
+                if (self.replaymem.current_capacity > self.batch_size):
                     batch_transition = self.replaymem.sample(self.batch_size)
                     self.dqn.optimize(batch_transition)
-                if Done: 
-                    print("game is over! next episode...")
-                    break
-            if (not ep % self.cp_step) or (not ep):
-                self._model_checkpoint()
+                print(ending_loginfo.format(rwd=reward,frm=self.env.total_frames))
+                if Done: break
+            if (not ep % self.cp_step) or (not ep): self._model_checkpoint()
                 
         self._exit_training()
 
