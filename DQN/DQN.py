@@ -103,7 +103,7 @@ class ReplayMemory(object):
     def store(self,transition_tuple):
         """transition_tuple should have the format of 
         (processed sequence,action,reward,next processed sequence).
-        only transition tuple that is of s_ list of length larger than 3 will 
+        only transition tuple that is of s_ list whose length larger than 3 will 
         be stored."""
         if transition_tuple[0].len_state > 3:
             list(map(self._save,[self.s_,self.a,self.r,self.next_s_],transition_tuple))
@@ -120,27 +120,59 @@ class ReplayMemory(object):
 class DQN(object):
     def __init__(self,sess,gamma,lr,batch_size):
         self.sess = sess
+        self.training_params_ls = []
+        self.evaluating_params_ls = []
         self.gamma = gamma
         self.lr = lr
         self.batch_size = batch_size
         self._probobility_space = np.linspace(1,0.1,1000000)
+        self.total_step = 0
+        self.copy_ops = []
         self._init_graph()
         
     def _init_graph(self):
         self._construct()
         self.sess.run(tf.global_variables_initializer())
+        writer = tf.summary.FileWriter("./log",self.sess.graph)
+        writer.close()
         
     def _flatten(self,layers):
         layers = tf.contrib.layers.flatten(layers)
         return layers
     
-    def _weights(self,shape):
+    def _weights(self,shape,name):
         initial = tf.truncated_normal(shape,stddev=0.1)
-        return tf.Variable(initial)
+        return tf.Variable(initial,name=name)
     
-    def _bias(self,shape):
+    def _bias(self,shape,name):
         initial = tf.constant(0.1,shape=shape)
-        return tf.Variable(initial)
+        return tf.Variable(initial,name=name)
+        
+    def _main_body(self,used_for_train):
+        with tf.name_scope("conv_1"):
+            w_h1 = self._weights([8,8,4,16],'w_h1')
+            b_h1 = self._bias([16],'b_h1')
+            h1_conv = tf.nn.conv2d(self.x,w_h1,[1,4,4,1],'SAME') + b_h1
+            h1 = tf.nn.relu(h1_conv)
+        with tf.name_scope("conv_2"):
+            w_h2 = self._weights([4,4,16,32],'w_h2')
+            b_h2 = self._bias([32],'b_h2')
+            h2_conv =tf.nn.conv2d(h1,w_h2,[1,2,2,1],'SAME') + b_h2
+            h2 = tf.nn.relu(h2_conv)
+        with tf.name_scope("fc"):
+            h2_flat = self._flatten(h2)
+            w_fc = self._weights([h2_flat.shape[1:].num_elements(),256],'w_fc')
+            b_fc = self._bias([256],'b_fc')
+            fc = tf.nn.relu(tf.matmul(h2_flat,w_fc) + b_fc)
+        with tf.name_scope("output"):                                          #self.output has shape of (1,4)
+            w_out = self._weights([256,4],'w_out')
+            b_out = self._bias([4],'b_out')
+            if used_for_train:
+                self.output = tf.matmul(fc,w_out) + b_out
+                self.training_params_ls.extend([w_h1,b_h1,w_h2,b_h2,w_fc,b_fc,w_out,b_out])
+            else:
+                self.output_eval = tf.matmul(fc,w_out) + b_out
+                self.evaluating_params_ls.extend([w_h1,b_h1,w_h2,b_h2,w_fc,b_fc,w_out,b_out])
         
     def _construct(self):
         """Define what the graph of DQN is.This method was called once instantiate
@@ -148,32 +180,20 @@ class DQN(object):
         self.x = tf.placeholder(dtype=tf.float32,shape=[None,210,160,4])               
         self.label_info = tf.placeholder(tf.int32,None)
         self.label = tf.placeholder(tf.float32,None)
-        with tf.name_scope("conv_1"):
-            w_h1 = self._weights([8,8,4,16])
-            b_h1 = self._bias([16])
-            h1_conv = tf.nn.conv2d(self.x,w_h1,[1,4,4,1],'SAME') + b_h1
-            h1 = tf.nn.relu(h1_conv)
-        with tf.name_scope("conv_2"):
-            w_h2 = self._weights([4,4,16,32])
-            b_h2 = self._bias([32])
-            h2_conv =tf.nn.conv2d(h1,w_h2,[1,2,2,1],'SAME') + b_h2
-            h2 = tf.nn.relu(h2_conv)
-        with tf.name_scope("fc"):
-            h2_flat = self._flatten(h2)
-            w_fc = self._weights([h2_flat.shape[1:].num_elements(),256])
-            b_fc = self._bias([256])
-            fc = tf.nn.relu(tf.matmul(h2_flat,w_fc) + b_fc)
-        with tf.name_scope("output"):
-            w_out = self._weights([256,4])
-            b_out = self._bias([4])
-            self.output = tf.matmul(fc,w_out) + b_out                          #self.output has shape of (1,4)
-        with tf.name_scope("filter_output"):
-            self.filtered_output = tf.gather_nd(self.output,indices=self.label_info)
-        with tf.name_scope("loss"):
-            loss = tf.losses.mean_squared_error(labels=self.label,
-                                                predictions=self.filtered_output)
-        with tf.name_scope("optimizer"):
-            self.train_step = tf.train.RMSPropOptimizer(self.lr).minimize(loss)
+        with tf.name_scope("training_graph"):
+            self._main_body(True)                   
+            with tf.name_scope("filter_output"):
+                self.filtered_output = tf.gather_nd(self.output,indices=self.label_info)
+            with tf.name_scope("loss"):
+                loss = tf.losses.mean_squared_error(labels=self.label,
+                                                    predictions=self.filtered_output)
+            with tf.name_scope("optimizer"):
+                self.train_step = tf.train.RMSPropOptimizer(self.lr).minimize(loss)
+        with tf.name_scope("evaluating_graph"):
+            self._main_body(False)
+        with tf.name_scope("copy_op"):
+            for t,s in zip(self.evaluating_params_ls,self.training_params_ls):
+                self.copy_ops.append(tf.assign(t,s))
                     
     def _compute_label(self,batch_transition):
         ret = []
@@ -183,7 +203,7 @@ class DQN(object):
             else:
                 x = np.array(piece[3].list_states[:]).reshape((1,210,160,4))
                 feed_dict = {self.x:x}
-                max_act_Q_value = np.max(self.sess.run(self.output,feed_dict=feed_dict))
+                max_act_Q_value = np.max(self.sess.run(self.output_eval,feed_dict=feed_dict))
                 y = piece[2] + self.gamma * max_act_Q_value
                 ret.append([y,piece[1]])
         return np.array(ret).reshape((len(ret),2))
@@ -196,6 +216,10 @@ class DQN(object):
     
     def _make_input_batch_select_action(self,seq):
         return np.array(seq.list_states[-4:]).reshape((1,210,160,4))
+        
+    def _backup(self):
+        for copy_op in self.copy_ops:
+            self.sess.run(copy_op)
     
     def select_action(self,seq,frame):                                         #ToDo:implement other branch of selection strategy,which is random selection (Done)
         if len(seq.list_states) > 3:
@@ -214,6 +238,7 @@ class DQN(object):
         """update network's parameters"""
         x = self._make_input_batch_optimize(batch_transition)
         info = self._compute_label(batch_transition)
+        self._backup()                                                         #once used evaluating graph , training grpah should be backup to evaluating graph
         label = info[:,0].reshape((info[:,0].size,1))
         info1 = np.array(range(32)).reshape((32,1)).astype(np.int32)
         info2 = info[:,1].reshape((self.batch_size,1)).astype(np.int32)
@@ -222,6 +247,7 @@ class DQN(object):
                      self.label:label, 
                      self.label_info:label_info}
         self.sess.run(self.train_step,feed_dict=feed_dict)
+        self.total_step += 1
     
 class Environment(object):
     def __init__(self):
