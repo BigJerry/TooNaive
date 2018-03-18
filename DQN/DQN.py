@@ -269,7 +269,7 @@ class Environment(object):
         next_state,reward,t_flag,info = self.env.step(act)
         self.total_frames += 1
         if info['ale.lives'] < self.last_lives:
-            reward = info['ale.lives'] - self.last_lives
+            reward = -1.0
             self.last_lives = info['ale.lives']
         self.env.render()
         return reward,next_state,t_flag
