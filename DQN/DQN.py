@@ -118,7 +118,7 @@ class ReplayMemory(object):
         return ret
     
 class DQN(object):
-    def __init__(self,sess,gamma,lr,batch_size):
+    def __init__(self,sess,gamma,lr,batch_size,from_scratch=False):
         self.sess = sess
         self.training_params_ls = []
         self.evaluating_params_ls = []
@@ -126,15 +126,31 @@ class DQN(object):
         self.lr = lr
         self.batch_size = batch_size
         self._probobility_space = np.linspace(1,0.1,1000000)
+        self.p = 1
         self.total_step = 0
         self.copy_ops = []
-        self._init_graph()
+        self._init_graph(from_scratch)
         
-    def _init_graph(self):
-        self._construct()
-        self.sess.run(tf.global_variables_initializer())
-        writer = tf.summary.FileWriter("./log",self.sess.graph)
-        writer.close()
+    def _init_graph(self,from_scratch):
+        if from_scratch:
+            self._construct()
+            self.sess.run(tf.global_variables_initializer())
+            writer = tf.summary.FileWriter("./log",self.sess.graph)
+            writer.close()
+        else:
+            saver = tf.train.import_meta_graph('./modelcp/dqn_model.meta')
+            saver.restore(self.sess,tf.train.latest_checkpoint('./modelcp'))
+            graph = tf.get_default_graph()
+            self.x = graph.get_tensor_by_name("x:0")
+            self.label = graph.get_tensor_by_name("label:0")
+            self.label_info = graph.get_tensor_by_name("label_info:0")
+            self.output = graph.get_tensor_by_name("training_graph/output/output:0")
+            self.output_eval = graph.get_tensor_by_name("evaluating_graph/output/output_eval:0")
+            self.train_step = graph.get_operation_by_name("training_graph/optimizer/train_step")
+            self.copy_ops.append(graph.get_operation_by_name("copy_op/Assign"))
+            for n in range(1,8):
+                self.copy_ops.append(graph.get_operation_by_name("copy_op/Assign_"+str(n)))
+            
         
     def _flatten(self,layers):
         layers = tf.contrib.layers.flatten(layers)
@@ -168,18 +184,18 @@ class DQN(object):
             w_out = self._weights([256,4],'w_out')
             b_out = self._bias([4],'b_out')
             if used_for_train:
-                self.output = tf.matmul(fc,w_out) + b_out
+                self.output = tf.add(tf.matmul(fc,w_out) , b_out,name="output")
                 self.training_params_ls.extend([w_h1,b_h1,w_h2,b_h2,w_fc,b_fc,w_out,b_out])
             else:
-                self.output_eval = tf.matmul(fc,w_out) + b_out
+                self.output_eval = tf.add(tf.matmul(fc,w_out) , b_out,name="output_eval")
                 self.evaluating_params_ls.extend([w_h1,b_h1,w_h2,b_h2,w_fc,b_fc,w_out,b_out])
         
     def _construct(self):
         """Define what the graph of DQN is.This method was called once instantiate
         a DQN object"""
-        self.x = tf.placeholder(dtype=tf.float32,shape=[None,210,160,4])               
-        self.label_info = tf.placeholder(tf.int32,None)
-        self.label = tf.placeholder(tf.float32,None)
+        self.x = tf.placeholder(dtype=tf.float32,shape=[None,84,84,4],name='x')               
+        self.label_info = tf.placeholder(tf.int32,None,name='label_info')
+        self.label = tf.placeholder(tf.float32,None,name='label')
         with tf.name_scope("training_graph"):
             self._main_body(True)                   
             with tf.name_scope("filter_output"):
@@ -188,7 +204,7 @@ class DQN(object):
                 loss = tf.losses.mean_squared_error(labels=self.label,
                                                     predictions=self.filtered_output)
             with tf.name_scope("optimizer"):
-                self.train_step = tf.train.RMSPropOptimizer(self.lr).minimize(loss)
+                self.train_step = tf.train.RMSPropOptimizer(self.lr).minimize(loss,name="train_step")
         with tf.name_scope("evaluating_graph"):
             self._main_body(False)
         with tf.name_scope("copy_op"):
@@ -201,7 +217,7 @@ class DQN(object):
             if piece[3].list_tflag[-1]:
                 ret.append([piece[2],piece[1]])
             else:
-                x = np.array(piece[3].list_states[:]).reshape((1,210,160,4))
+                x = np.array(piece[3].list_states[:]).reshape((1,84,84,4))
                 feed_dict = {self.x:x}
                 max_act_Q_value = np.max(self.sess.run(self.output_eval,feed_dict=feed_dict))
                 y = piece[2] + self.gamma * max_act_Q_value
@@ -212,10 +228,10 @@ class DQN(object):
         ret = []
         for piece in batch_transition:
             ret.append(piece[0].list_states[:])
-        return np.array(ret).reshape((self.batch_size,210,160,4))
+        return np.array(ret).reshape((self.batch_size,84,84,4))
     
     def _make_input_batch_select_action(self,seq):
-        return np.array(seq.list_states[-4:]).reshape((1,210,160,4))
+        return np.array(seq.list_states[-4:]).reshape((1,84,84,4))
         
     def _backup(self):
         for copy_op in self.copy_ops:
@@ -223,8 +239,8 @@ class DQN(object):
     
     def select_action(self,seq,frame):                                         #ToDo:implement other branch of selection strategy,which is random selection (Done)
         if len(seq.list_states) > 3:
-            p = (self._probobility_space[frame] if frame <= 999999 else 0.1)
-            act_randomly = np.random.binomial(1,p)
+            self.p = (self._probobility_space[frame] if frame <= 999999 else 0.1)
+            act_randomly = np.random.binomial(1,self.p)
             if act_randomly: 
                 return random.randrange(0,4)
             else:
@@ -287,6 +303,8 @@ class Learning(object):
             state = seq.list_states[n] 
             img = Image.fromarray(np.uint8(state))
             img = img.convert("L")
+            img = img.crop((8,33,152,195))
+            img = img.resize((84,84))
             state = np.array(img).astype(np.uint8)
             state = state / 255                                                #rescale image into range 0 ~ 1
             ret.list_states.append(state)
@@ -321,8 +339,8 @@ class Learning(object):
         self.replaymem = ReplayMemory(self.capacity)
         self.dqn = DQN(self.learningSession,self.gamma,self.lr,self.batch_size)
         self.env = Environment()
-        initial_loginfo = "Now in episode {epi}; timestep {time}."
-        ending_loginfo = "Reward is {rwd}; current frame:{frm}"
+        initial_loginfo = "Now in episode {epi}; timestep {time}\nact randomly with {p}"
+        ending_loginfo = "Reward is {rwd}; total step of optimization:{opt}"
         
         self._init_saver()
         for ep in range(self.episode_num):
@@ -330,7 +348,7 @@ class Learning(object):
             seq.reset()
             act = 0
             for ts in range(self.timesteps):
-                print(initial_loginfo.format(epi=ep,time=ts))
+                print(initial_loginfo.format(epi=ep,time=ts,p=self.dqn.p))
                 seq_ = self._preprocess_seq(seq)
                 if not (ts % self.step_size):
                     act = self.dqn.select_action(seq_,self.env.total_frames)   #skip step_size frames as paper said
@@ -343,7 +361,7 @@ class Learning(object):
                 if (self.replaymem.current_capacity > self.batch_size):
                     batch_transition = self.replaymem.sample(self.batch_size)
                     self.dqn.optimize(batch_transition)
-                print(ending_loginfo.format(rwd=reward,frm=self.env.total_frames))
+                print(ending_loginfo.format(rwd=reward,opt=self.dqn.total_step))
                 if Done: break
             if (not ep % self.cp_step) or (not ep): self._model_checkpoint()
                 
