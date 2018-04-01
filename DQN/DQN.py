@@ -34,23 +34,15 @@ class StateSequence(object):
         self.list_states.append(init_state)
     
     def expand(self,act,next_state,t_flag):
-        next_seq = StateSequence(self.env)
-        
+        def expand_(ls,ele):
+            if len(ls) > 3: ls.pop(0)
+            ls.append(ele)
         next_action_list = self.list_actions.copy()
-        if len(next_action_list) > 3:
-            next_action_list.pop(0)
-        next_action_list.append(act)
-        
         next_state_list = self.list_states.copy()
-        if len(next_state_list) > 3:
-            next_state_list.pop(0)
-        next_state_list.append(next_state)
-        
-        next_tflag_list = self.list_tflag.copy()
-        if len(next_tflag_list) > 3:
-            next_tflag_list.pop(0)
-        next_tflag_list.append(t_flag)        
-        
+        next_tflag_list = self.list_tflag.copy() 
+        list(map(expand_,[next_action_list,next_state_list,next_tflag_list], \
+                 [act,next_state,t_flag]))
+        next_seq = StateSequence(self.env)
         next_seq.list_actions = next_action_list
         next_seq.list_states = next_state_list
         next_seq.list_tflag = next_tflag_list
@@ -58,8 +50,7 @@ class StateSequence(object):
     
     def update(self,act,next_state,t_flag):
         def pop_if_overflow(ls):
-            if len(ls) > 3:
-                ls.pop(0)
+            if len(ls) > 3: ls.pop(0)
         list(map(pop_if_overflow,[self.list_actions,self.list_states,self.list_tflag]))
         self.list_actions.append(act)
         self.list_states.append(next_state)
@@ -116,9 +107,25 @@ class ReplayMemory(object):
         ret_ls = list(map(self._get_sample,[self.s_,self.a,self.r,self.next_s_],[hitted_idxs]*4))
         ret = self._make_sample_ret(ret_ls)
         return ret
+        
+    def save(self):
+        print("saving replay memory...")
+        np.array(self.s_).dump('./modelcp/replaymem_s_.npy')
+        np.array(self.next_s_).dump('./modelcp/replaymem_next_s_.npy')
+        np.array(self.a).dump('./modelcp/replaymem_a.npy')
+        np.array(self.r).dump('./modelcp/replaymem_r.npy')
+        print("replay memory saved.")
+    
+    def load(self):
+        print("loading replay memory...")
+        self.s_ = list(np.load('./modelcp/replaymem_s_.npy'))
+        self.next_s_ = list(np.load('./modelcp/replaymem_next_s_.npy'))
+        self.a = list(np.load('./modelcp/replaymem_a.npy'))
+        self.r = list(np.load('./modelcp/replaymem_r.npy'))
+        print("Done.")
     
 class DQN(object):
-    def __init__(self,sess,gamma,lr,batch_size,from_scratch=False):
+    def __init__(self,sess,gamma,lr,batch_size,from_scratch=True):
         self.sess = sess
         self.training_params_ls = []
         self.evaluating_params_ls = []
@@ -150,20 +157,19 @@ class DQN(object):
             self.copy_ops.append(graph.get_operation_by_name("copy_op/Assign"))
             for n in range(1,8):
                 self.copy_ops.append(graph.get_operation_by_name("copy_op/Assign_"+str(n)))
-            
-        
+
     def _flatten(self,layers):
         layers = tf.contrib.layers.flatten(layers)
         return layers
-    
+
     def _weights(self,shape,name):
         initial = tf.truncated_normal(shape,stddev=0.1)
         return tf.Variable(initial,name=name)
-    
+
     def _bias(self,shape,name):
         initial = tf.constant(0.1,shape=shape)
         return tf.Variable(initial,name=name)
-        
+
     def _main_body(self,used_for_train):
         with tf.name_scope("conv_1"):
             w_h1 = self._weights([8,8,4,16],'w_h1')
@@ -189,7 +195,7 @@ class DQN(object):
             else:
                 self.output_eval = tf.add(tf.matmul(fc,w_out) , b_out,name="output_eval")
                 self.evaluating_params_ls.extend([w_h1,b_h1,w_h2,b_h2,w_fc,b_fc,w_out,b_out])
-        
+
     def _construct(self):
         """Define what the graph of DQN is.This method was called once instantiate
         a DQN object"""
@@ -210,7 +216,7 @@ class DQN(object):
         with tf.name_scope("copy_op"):
             for t,s in zip(self.evaluating_params_ls,self.training_params_ls):
                 self.copy_ops.append(tf.assign(t,s))
-                    
+
     def _compute_label(self,batch_transition):
         ret = []
         for piece in batch_transition:
@@ -223,13 +229,13 @@ class DQN(object):
                 y = piece[2] + self.gamma * max_act_Q_value
                 ret.append([y,piece[1]])
         return np.array(ret).reshape((len(ret),2))
-    
+
     def _make_input_batch_optimize(self,batch_transition):
         ret = []
         for piece in batch_transition:
             ret.append(piece[0].list_states[:])
         return np.array(ret).reshape((self.batch_size,84,84,4))
-    
+
     def _make_input_batch_select_action(self,seq):
         return np.array(seq.list_states[-4:]).reshape((1,84,84,4))
         
@@ -237,9 +243,9 @@ class DQN(object):
         for copy_op in self.copy_ops:
             self.sess.run(copy_op)
     
-    def select_action(self,seq,frame):                                         #ToDo:implement other branch of selection strategy,which is random selection (Done)
+    def select_action(self,seq,step):                                         #ToDo:implement other branch of selection strategy,which is random selection (Done)
         if len(seq.list_states) > 3:
-            self.p = (self._probobility_space[frame] if frame <= 999999 else 0.1)
+            self.p = (self._probobility_space[step] if step <= 999999 else 0.1)
             act_randomly = np.random.binomial(1,self.p)
             if act_randomly: 
                 return random.randrange(0,4)
@@ -268,7 +274,6 @@ class DQN(object):
 class Environment(object):
     def __init__(self):
         self._init_env()
-        self.total_frames = 0
         self.last_lives = 5                                                    #specify total lives of agent . It varies depending on different games.
         
     def _init_env(self):
@@ -283,7 +288,6 @@ class Environment(object):
         by a tuple.And also when you call this method it will render a window
         to show you result where action has been performed."""
         next_state,reward,t_flag,info = self.env.step(act)
-        self.total_frames += 1
         if info['ale.lives'] < self.last_lives:
             reward = -1.0
             self.last_lives = info['ale.lives']
@@ -291,16 +295,29 @@ class Environment(object):
         return reward,next_state,t_flag
                                                         
 class Learning(object):
-    def __init__(self,episode=60000,timestep=300000,capacity=2000,gamma=0.7,learning_rate=0.003,batch_size=32,step_size=4,cp_step=500):
-        self._init_training_parameters(episode,timestep,capacity,gamma,learning_rate,
-                                       batch_size,step_size,cp_step)
+    def __init__(self,epoch=200,epoch_size=50000,capacity=4000,gamma=0.7,learning_rate=0.03,batch_size=32,step_size=4,ckpt_step=50000,from_scratch=True):
+        self.epoch = epoch
+        self.epoch_size = epoch_size
+        self.capacity = capacity
+        self.gamma = gamma
+        self.lr = learning_rate
+        self.batch_size = batch_size
+        self.step_size = step_size
+        self.ckpt_step = ckpt_step
+        self.from_scratch = from_scratch
+        
         self._init_tf_session()
+    
+    @property
+    def epoch_info(self):
+        """return (epoch,step)"""
+        return self.dqn.total_step//self.epoch_size,self.dqn.total_step%self.epoch_size
     
     def _preprocess_seq(self,seq):                                             #ToDo:1:need to check the logic under the whole control flow (Done)
         ret = seq.copy()                                                       #     2:need to add other operations to preprocess image (Done)
         ret.list_states = []
         for n in range(len(seq.list_states)) :    
-            state = seq.list_states[n] 
+            state = seq.list_states[n]
             img = Image.fromarray(np.uint8(state))
             img = img.convert("L")
             img = img.crop((8,33,152,195))
@@ -313,19 +330,14 @@ class Learning(object):
     def _init_tf_session(self):
         tf.reset_default_graph()
         self.learningSession = tf.Session()
-    
-    def _init_training_parameters(self,episode_num,timesteps,capacity,gamma,learning_rate,batch_size,step_size,cp_step):
-        self.episode_num = episode_num
-        self.timesteps = timesteps
-        self.capacity = capacity
-        self.gamma = gamma
-        self.lr = learning_rate
-        self.batch_size = batch_size
-        self.step_size = step_size
-        self.cp_step = cp_step
         
     def _init_saver(self):
         self.saver = tf.train.Saver()
+        
+    def _restore(self):
+        with open('./modelcp/record','r') as f:
+            self.dqn.total_step = int(f.read())
+        self.replaymem.load()
         
     def _exit_training(self):
         self.learningSession.close()
@@ -333,25 +345,36 @@ class Learning(object):
         
     def _model_checkpoint(self):
         self.saver.save(self.learningSession,'./modelcp/dqn_model')
+        with open('./modelcp/record','w+') as f:
+            f.write(str(self.dqn.total_step))
+        self.replaymem.save()
     
     def train(self):
-        
         self.replaymem = ReplayMemory(self.capacity)
-        self.dqn = DQN(self.learningSession,self.gamma,self.lr,self.batch_size)
+        self.dqn = DQN(self.learningSession,self.gamma,self.lr,self.batch_size,self.from_scratch)
         self.env = Environment()
-        initial_loginfo = "Now in episode {epi}; timestep {time}\nact randomly with {p}"
-        ending_loginfo = "Reward is {rwd}; total step of optimization:{opt}"
+        initial_loginfo = """Epoch {epo}; step {stp}
+Episode {epi}; Timestep {time}
+Act randomly with {p}"""
+        ending_loginfo = """Reward {rwd}\nTotal Step {opt}"""
         
         self._init_saver()
-        for ep in range(self.episode_num):
+        if not self.from_scratch : self._restore()
+        for ep in range(int(1e7)):
+            if self.dqn.total_step > self.epoch * self.epoch_size: 
+                print("training completed.")                
+                break          
             seq = StateSequence(self.env)
             seq.reset()
             act = 0
-            for ts in range(self.timesteps):
-                print(initial_loginfo.format(epi=ep,time=ts,p=self.dqn.p))
+            for ts in range(int(1e7)):
+                print(initial_loginfo.format(epo=self.epoch_info[0],
+                                             stp=self.epoch_info[1],
+                                             epi=ep,time=ts,
+                                             p=self.dqn.p))
                 seq_ = self._preprocess_seq(seq)
                 if not (ts % self.step_size):
-                    act = self.dqn.select_action(seq_,self.env.total_frames)   #skip step_size frames as paper said
+                    act = self.dqn.select_action(seq_,self.dqn.total_step)     #skip step_size frames as paper said
                 reward,next_state,Done = self.env.trigger_emulator(act)
                 next_seq = seq.expand(act,next_state,Done)
                 next_seq_ = self._preprocess_seq(next_seq)
@@ -363,10 +386,11 @@ class Learning(object):
                     self.dqn.optimize(batch_transition)
                 print(ending_loginfo.format(rwd=reward,opt=self.dqn.total_step))
                 if Done: break
-            if (not ep % self.cp_step) or (not ep): self._model_checkpoint()
+                if ((not self.dqn.total_step % self.ckpt_step) and (self.dqn.total_step)):
+                    self._model_checkpoint()
                 
         self._exit_training()
 
 if __name__ == '__main__':
-    dqn_learning = Learning()
+    dqn_learning = Learning(from_scratch=False)
     dqn_learning.train()
